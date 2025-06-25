@@ -3,6 +3,8 @@ import logging
 from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.constants import ParseMode
+from telegram.helpers import mention_html
 import re
 import pytz
 
@@ -17,6 +19,7 @@ BOT_TOKEN = "7384921058:AAEcDrQbW0kcQwceYDH4inZGq15Wtu-c9hE"
 KYRGYZSTAN_TZ = pytz.timezone("Asia/Bishkek")
 
 group_settings = {}
+group_users = {}  # chat_id: set(user_ids)
 waiting_for_time = set()
 
 # /start
@@ -38,13 +41,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "minute": 0,
         "last_sent_date": None
     }
+    group_users[chat_id] = set()
     await update.message.reply_text(
-        "✅ Группа подписана на напоминания!\n"
-        "⏰ Время по умолчанию: 21:00\n"
-        "📋 Команды:\n"
-        "⏰ /time - установить время отправки\n"
-        "🛑 /stop - отписать группу\n"
-        "❓ /help - показать справку"
+        "💜 Здравствуйте!\n"
+        "Я — 🤖 бот Envio — ваш личный напоминатель от курсов английского языка Envio.\n"
+        "📌 Моя задача: напоминать вам о выполнении домашнего задания, чтобы ваш английский становился всё лучше с каждым днём!"
+        "Нажмите /join чтобы подписаться\n"
+    )
+
+
+# /join
+async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+
+    if chat_id not in group_settings or not group_settings[chat_id]["subscribed"]:
+        await update.message.reply_text("❗Группа не подписана. Сначала используйте /start")
+        return
+
+    if chat_id not in group_users:
+        group_users[chat_id] = set()
+
+    group_users[chat_id].add(user.id)
+    logger.info(f"👤 Добавлен: {user.full_name} (ID: {user.id}, @username: {user.username}) в чат {chat_id}")
+    await update.message.reply_text(
+        f"👋 {user.full_name}, вы подписались на напоминания!\n"
+        f"✅ Ваш username: @{user.username}" if user.username else "❗ У вас не задан username!"
     )
 
 # /stop
@@ -138,18 +160,40 @@ async def send_daily_message(context: ContextTypes.DEFAULT_TYPE):
             and settings["hour"] == hour
             and settings["minute"] == minute
             and settings.get("last_sent_date") != today_str):
+
             try:
+                mentions = []
+                logger.info(f"🔍 Подписанные в чате {chat_id}: {group_users.get(chat_id)}")
+
+                for user_id in group_users.get(chat_id, []):
+                    try:
+                        member = await context.bot.get_chat_member(chat_id, user_id)
+                        user = member.user
+                        if user.username:
+                            mentions.append(f"@{user.username}")
+                        else:
+                            mentions.append(mention_html(user.id, user.full_name))
+                    except Exception as e:
+                        logger.error(f"Ошибка при получении {user_id}: {e}")
+
+                mention_text = " ".join(mentions)
+                logger.info(f"📣 Упоминания: {mention_text}")
+
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=(
+                        f"{mention_text}\n\n"
                         f"Всем здравствуйте! 🌟\n"
                         f"Напоминаю, что нужно:\n"
                         f"✅ отправить свои результаты по Duolingo и Polyglot\n"
                         f"✅ прикрепить конспекты, если они были.\n"
-                        f"Спасибо за вашу ответственность! Жду ваши отчёты. 😊\n"
-                    )
+                        f"Спасибо за вашу ответственность! Жду ваши отчёты. 😊"
+                    ),
+                    parse_mode=ParseMode.HTML
                 )
+
                 group_settings[chat_id]["last_sent_date"] = today_str
+
             except Exception as e:
                 logger.error(f"Ошибка отправки в {chat_id}: {e}")
                 if "bot was kicked" in str(e).lower():
@@ -171,6 +215,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📋 Команды:\n"
         "/start — подписать группу\n"
+        "/join — подписаться на упоминания\n"
         "/time — установить время\n"
         "/stop — отписаться\n"
         "/status — статус\n"
@@ -178,7 +223,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # Запуск
-from telegram.ext import Application, ApplicationBuilder, JobQueue
+from telegram.ext import ApplicationBuilder, JobQueue
 
 async def setup_jobqueue(app):
     job_queue = app.job_queue
@@ -188,13 +233,14 @@ def main():
     application = Application.builder().token(BOT_TOKEN).post_init(setup_jobqueue).build()
 
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("join", join))
     application.add_handler(CommandHandler("stop", stop))
     application.add_handler(CommandHandler("time", time_command))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(MessageHandler(filters.TEXT, handle_time_input))
 
-    print("✅ Бот готов и слушает все текстовые сообщения")
+    print("✅ Бот запущен и готов к работе")
     application.run_polling()
 
 if __name__ == "__main__":
