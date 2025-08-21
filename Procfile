@@ -1,1 +1,1 @@
-worker: python reminder_bot.py
+web: python main.py
