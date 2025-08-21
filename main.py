@@ -86,7 +86,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "💜 Здравствуйте!\n"
         "Я — 🤖 бот Envio — ваш личный напоминатель от курсов английского языка Envio.\n"
-        "📌 Моя задача: напоминать вам о выполнении домашнего задания, чтобы ваш английский становился всё лучше с каждым днём!"
+        "📌 Моя задача: напоминать вам о выполнении домашнего задания, чтобы ваш английский становился всё лучше с каждым днём!\n"
         "Нажмите /join чтобы подписаться\n"
     )
 
@@ -239,6 +239,11 @@ async def send_daily_message(context: ContextTypes.DEFAULT_TYPE):
                 if "bot was kicked" in str(e).lower():
                     del group_settings[chat_id]
 
+# Обёртка для асинхронной функции keep_alive в JobQueue
+async def keep_alive_wrapper(context: ContextTypes.DEFAULT_TYPE):
+    """Обёртка для запуска keep_alive в JobQueue"""
+    await keep_alive()
+
 # /status
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -262,19 +267,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/help — помощь"
     )
 
-# Настройка job queue
-async def setup_jobqueue(app):
-    job_queue = app.job_queue
-    job_queue.run_repeating(send_daily_message, interval=60, first=10)  # каждую минуту
-    
-    # Keep alive только для Render
-    if os.environ.get("RENDER_EXTERNAL_URL"):
-        job_queue.run_repeating(
-            lambda context: asyncio.create_task(keep_alive()), 
-            interval=840, 
-            first=60
-        )
-
 def main():
     # Запуск health server в отдельном потоке для Render
     if os.environ.get("RENDER_EXTERNAL_URL"):
@@ -282,26 +274,33 @@ def main():
         health_thread.start()
         logger.info("Health server started")
     
-    # Создание приложения с исправленной инициализацией
     try:
+        # Создание приложения с правильной инициализацией
         application = Application.builder().token(BOT_TOKEN).build()
         
-        # Настройка job queue после создания приложения
+        # Проверяем наличие JobQueue
+        if application.job_queue is None:
+            logger.error("JobQueue не инициализирован! Проверьте установку python-telegram-bot[job-queue]")
+            return
+        
+        logger.info("JobQueue успешно инициализирован")
+        
+        # Настройка job queue
         job_queue = application.job_queue
         job_queue.run_repeating(send_daily_message, interval=60, first=10)
+        logger.info("Задача send_daily_message добавлена в очередь")
         
         # Keep alive только для Render
         if os.environ.get("RENDER_EXTERNAL_URL"):
-            job_queue.run_repeating(
-                lambda context: asyncio.create_task(keep_alive()), 
-                interval=840, 
-                first=60
-            )
+            # Исправлено: используем правильную обёртку
+            job_queue.run_repeating(keep_alive_wrapper, interval=840, first=60)
+            logger.info("Задача keep_alive добавлена в очередь")
         
     except Exception as e:
         logger.error(f"Ошибка создания приложения: {e}")
         return
 
+    # Добавление обработчиков команд
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("join", join))
     application.add_handler(CommandHandler("stop", stop))
