@@ -7,6 +7,10 @@ from telegram.constants import ParseMode
 from telegram.helpers import mention_html
 import re
 import pytz
+import os
+import aiohttp
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
 
 # Настройка логирования
 logging.basicConfig(
@@ -15,12 +19,49 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = "7384921058:AAEcDrQbW0kcQwceYDH4inZGq15Wtu-c9hE"
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "7384921058:AAEcDrQbW0kcQwceYDH4inZGq15Wtu-c9hE")
 KYRGYZSTAN_TZ = pytz.timezone("Asia/Bishkek")
 
 group_settings = {}
 group_users = {}  # chat_id: set(user_ids)
 waiting_for_time = set()
+
+# Health check endpoint
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'OK')
+        else:
+            self.send_response(404)
+            self.end_headers()
+    
+    def log_message(self, format, *args):
+        pass  # Отключаем логи HTTP сервера
+
+def start_health_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), HealthHandler)
+    server.serve_forever()
+
+# Keep alive функция
+async def keep_alive():
+    """Функция для предотвращения засыпания на Render"""
+    render_url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not render_url:
+        return
+        
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                await session.get(f"{render_url}/health")
+            logger.info("Keep alive ping sent")
+        except Exception as e:
+            logger.error(f"Keep alive error: {e}")
+        
+        await asyncio.sleep(840)  # каждые 14 минут
 
 # /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -48,7 +89,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📌 Моя задача: напоминать вам о выполнении домашнего задания, чтобы ваш английский становился всё лучше с каждым днём!"
         "Нажмите /join чтобы подписаться\n"
     )
-
 
 # /join
 async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -222,15 +262,45 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/help — помощь"
     )
 
-# Запуск
-from telegram.ext import ApplicationBuilder, JobQueue
-
+# Настройка job queue
 async def setup_jobqueue(app):
     job_queue = app.job_queue
-    job_queue.run_repeating(send_daily_message, interval=30, first=0)
+    job_queue.run_repeating(send_daily_message, interval=60, first=10)  # каждую минуту
+    
+    # Keep alive только для Render
+    if os.environ.get("RENDER_EXTERNAL_URL"):
+        job_queue.run_repeating(
+            lambda context: asyncio.create_task(keep_alive()), 
+            interval=840, 
+            first=60
+        )
 
 def main():
-    application = Application.builder().token(BOT_TOKEN).post_init(setup_jobqueue).build()
+    # Запуск health server в отдельном потоке для Render
+    if os.environ.get("RENDER_EXTERNAL_URL"):
+        health_thread = threading.Thread(target=start_health_server, daemon=True)
+        health_thread.start()
+        logger.info("Health server started")
+    
+    # Создание приложения с исправленной инициализацией
+    try:
+        application = Application.builder().token(BOT_TOKEN).build()
+        
+        # Настройка job queue после создания приложения
+        job_queue = application.job_queue
+        job_queue.run_repeating(send_daily_message, interval=60, first=10)
+        
+        # Keep alive только для Render
+        if os.environ.get("RENDER_EXTERNAL_URL"):
+            job_queue.run_repeating(
+                lambda context: asyncio.create_task(keep_alive()), 
+                interval=840, 
+                first=60
+            )
+        
+    except Exception as e:
+        logger.error(f"Ошибка создания приложения: {e}")
+        return
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("join", join))
@@ -240,8 +310,8 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(MessageHandler(filters.TEXT, handle_time_input))
 
-    print("✅ Бот запущен и готов к работе")
-    application.run_polling()
+    logger.info("✅ Бот запущен и готов к работе")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
