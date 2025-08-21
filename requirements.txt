@@ -1,3 +1,2 @@
-python-telegram-bot[job-queue]==20.8
-pytz==2023.3
-aiohttp==3.9.1
+python-telegram-bot[job-queue]==21.5
+pytz==2024.1
